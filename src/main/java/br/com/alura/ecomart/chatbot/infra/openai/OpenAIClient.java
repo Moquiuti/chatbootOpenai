@@ -10,9 +10,15 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
 
+/**
+ * Classe responsável por interagir com a API do OpenAI.
+ */
 @Component
 public class OpenAIClient {
 
@@ -21,6 +27,12 @@ public class OpenAIClient {
     private String threadId;
     private final OpenAiService service;
 
+    /**
+     * Construtor que inicializa o cliente OpenAI com as chaves de API e assistente.
+     *
+     * @param apiKey Chave da API do OpenAI.
+     * @param assistantId ID do assistente do OpenAI.
+     */
     public OpenAIClient(@Value("${app.openai.api.key}") String apiKey,
                         @Value("${app.openai.api.assistant.id}") String assistantId) {
         this.apiKey = apiKey;
@@ -28,19 +40,21 @@ public class OpenAIClient {
         this.service = new OpenAiService(apiKey, Duration.ofSeconds(60));
     }
 
+    /**
+     * Envia uma requisição de conclusão de chat para o OpenAI.
+     *
+     * @param dados Dados da requisição de chat.
+     * @return Resposta do assistente.
+     */
     public String enviarRequisicaoChatCompletion(DadosRequisicaoChatCompletion dados) {
-        /**
-         * Cria a Mensagem
-         */
+        // Cria a Mensagem
         var messageRequest = MessageRequest
                 .builder()
                 .role(ChatMessageRole.USER.value())
                 .content(dados.promptUsuario())
                 .build();
 
-        /**
-         * Cria a Thread ou utiliza caso ela já tenha sido criada
-         */
+        // Cria a Thread ou utiliza caso ela já tenha sido criada
         if (this.threadId == null) {
             var threadRequest = ThreadRequest
                     .builder()
@@ -52,26 +66,15 @@ public class OpenAIClient {
         } else {
             service.createMessage(this.threadId, messageRequest);
         }
-        /**
-         * Por fim criado o objeto run, passando o id do assistant e o id da thread
-         */
+
+        // Cria o objeto run, passando o id do assistant e o id da thread
         var runRequest = RunCreateRequest
                 .builder()
                 .assistantId(assistantId)
                 .build();
         var run = service.createRun(threadId, runRequest);
 
-        /**
-         * loop while para continuar enquanto o status de Run não foi igual a "completed".
-         * Thread.sleep() para um tempos de espera de 10 segundos
-         * depois desses 10 segundos, é chamada a service e enviando buscar novamente o Run.
-         * é feito uma consulta para carregar novamente o Run e verificar se o status mudou para completed.
-         * Enquanto não estiver completed, ele vai ficar nesse loop.
-         *
-         * Isso gera um erro de compilação no sleep(), porque ele lança uma exception.
-         * por isso esse while está dentro de um try/catch. No catch(), eu busco uma Exception e, se acontecer,
-         * será interrompido aqui o programa com throw new RuntimeException(e).
-         */
+        // Loop while para continuar enquanto o status de Run não for igual a "completed"
         try {
             while (!run.getStatus().equalsIgnoreCase("completed")) {
                 Thread.sleep(1000 * 10);
@@ -80,9 +83,8 @@ public class OpenAIClient {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-        /**
-         * Obtendo a resposta do Run
-         */
+
+        // Obtendo a resposta do Run
         var mensagens = service.listMessages(threadId);
         var respostaAssistente = mensagens
                 .getData()
@@ -93,4 +95,24 @@ public class OpenAIClient {
         return respostaAssistente;
     }
 
+    /**
+     * Carrega o histórico de mensagens da thread atual.
+     *
+     * @return Lista de mensagens do histórico.
+     */
+    public List<String> carregarHistoricoDeMensagens() {
+        var mensagens = new ArrayList<String>();
+
+        if (this.threadId != null) {
+            mensagens.addAll(
+                    service.listMessages(this.threadId)
+                            .getData()
+                            .stream()
+                            .sorted(Comparator.comparingInt(Message::getCreatedAt))
+                            .map(m -> m.getContent().get(0).getText().getValue())
+                            .collect(Collectors.toList())
+            );
+        }
+        return mensagens;
+    }
 }
