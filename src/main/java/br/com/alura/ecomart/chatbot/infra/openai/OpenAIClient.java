@@ -1,24 +1,27 @@
 package br.com.alura.ecomart.chatbot.infra.openai;
 
+import br.com.alura.ecomart.chatbot.domain.DadosCalculoFrete;
+import br.com.alura.ecomart.chatbot.domain.service.CalculadorDeFrete;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.theokanning.openai.completion.chat.ChatFunction;
+import com.theokanning.openai.completion.chat.ChatFunctionCall;
 import com.theokanning.openai.completion.chat.ChatMessageRole;
 import com.theokanning.openai.messages.Message;
 import com.theokanning.openai.messages.MessageRequest;
+import com.theokanning.openai.runs.Run;
 import com.theokanning.openai.runs.RunCreateRequest;
+import com.theokanning.openai.runs.SubmitToolOutputRequestItem;
+import com.theokanning.openai.runs.SubmitToolOutputsRequest;
+import com.theokanning.openai.service.FunctionExecutor;
 import com.theokanning.openai.service.OpenAiService;
 import com.theokanning.openai.threads.ThreadRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Classe responsável por interagir com a API do OpenAI.
- */
 @Component
 public class OpenAIClient {
 
@@ -26,39 +29,26 @@ public class OpenAIClient {
     private final String assistantId;
     private String threadId;
     private final OpenAiService service;
+    private final CalculadorDeFrete calculadorDeFrete;
 
-    /**
-     * Construtor que inicializa o cliente OpenAI com as chaves de API e assistente.
-     *
-     * @param apiKey      Chave da API do OpenAI.
-     * @param assistantId ID do assistente do OpenAI.
-     */
-    public OpenAIClient(@Value("${app.openai.api.key}") String apiKey,
-                        @Value("${app.openai.api.assistant.id}") String assistantId) {
+    public OpenAIClient(@Value("${app.openai.api.key}") String apiKey, @Value("${app.openai.api.assistant.id}") String assistantId, CalculadorDeFrete calculadorDeFrete) {
         this.apiKey = apiKey;
-        this.assistantId = assistantId;
         this.service = new OpenAiService(apiKey, Duration.ofSeconds(60));
+        this.assistantId = assistantId;
+        this.calculadorDeFrete = calculadorDeFrete;
     }
 
-    /**
-     * Envia uma requisição de conclusão de chat para o OpenAI.
-     *
-     * @param dados Dados da requisição de chat.
-     * @return Resposta do assistente.
-     */
     public String enviarRequisicaoChatCompletion(DadosRequisicaoChatCompletion dados) {
-        // Cria a Mensagem
         var messageRequest = MessageRequest
                 .builder()
                 .role(ChatMessageRole.USER.value())
                 .content(dados.promptUsuario())
                 .build();
 
-        // Cria a Thread ou utiliza caso ela já tenha sido criada
         if (this.threadId == null) {
             var threadRequest = ThreadRequest
                     .builder()
-                    .messages(Arrays.asList(messageRequest))
+                    .messages(Collections.singletonList(messageRequest))
                     .build();
 
             var thread = service.createThread(threadRequest);
@@ -67,59 +57,100 @@ public class OpenAIClient {
             service.createMessage(this.threadId, messageRequest);
         }
 
-        // Cria o objeto run, passando o id do assistant e o id da thread
         var runRequest = RunCreateRequest
                 .builder()
                 .assistantId(assistantId)
                 .build();
         var run = service.createRun(threadId, runRequest);
 
-        // Loop while para continuar enquanto o status de Run não for igual a "completed"
+        var concluido = false;
+        var precisaChamarFuncao = false;
         try {
-            while (!run.getStatus().equalsIgnoreCase("completed")) {
+            while (!concluido && !precisaChamarFuncao) {
                 Thread.sleep(1000 * 10);
                 run = service.retrieveRun(threadId, run.getId());
+                concluido = run.getStatus().equalsIgnoreCase("completed");
+                precisaChamarFuncao = run.getRequiredAction() != null;
             }
-        } catch (Exception e) {
+        } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
 
-        // Obtendo a resposta do Run
+        if (precisaChamarFuncao) {
+            var precoDoFrete = chamarFuncao(run);
+            var submitRequest = SubmitToolOutputsRequest
+                    .builder()
+                    .toolOutputs(Arrays.asList(
+                            new SubmitToolOutputRequestItem(
+                                    run
+                                            .getRequiredAction()
+                                            .getSubmitToolOutputs()
+                                            .getToolCalls()
+                                            .get(0)
+                                            .getId(),
+                                    precoDoFrete)
+                    ))
+                    .build();
+            service.submitToolOutputs(threadId, run.getId(), submitRequest);
+
+            try {
+                while (!concluido) {
+                    Thread.sleep(1000 * 10);
+                    run = service.retrieveRun(threadId, run.getId());
+                    concluido = run.getStatus().equalsIgnoreCase("completed");
+                }
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
         var mensagens = service.listMessages(threadId);
-        var respostaAssistente = mensagens
+        return mensagens
                 .getData()
                 .stream()
                 .sorted(Comparator.comparingInt(Message::getCreatedAt).reversed())
                 .findFirst().get().getContent().get(0).getText().getValue();
-
-        return respostaAssistente;
     }
 
-    /**
-     * Carrega o histórico de mensagens da thread atual.
-     *
-     * @return Lista de mensagens do histórico.
-     */
+    private String chamarFuncao(Run run) {
+        try {
+            var funcao = run.getRequiredAction().getSubmitToolOutputs().getToolCalls().get(0).getFunction();
+            var funcaoCalcularFrete = ChatFunction.builder()
+                    .name("calcularFrete")
+                    .executor(DadosCalculoFrete.class, calculadorDeFrete::calcular)
+                    .build();
+
+            var executorDeFuncoes = new FunctionExecutor(Arrays.asList(funcaoCalcularFrete));
+            var functionCall = new ChatFunctionCall(funcao.getName(), new ObjectMapper().readTree(funcao.getArguments()));
+            return executorDeFuncoes.execute(functionCall).toString();
+        } catch (Exception e) {
+            e.printStackTrace(); // Logar exceção completa
+            throw new RuntimeException("Erro ao chamar função: " + e.getMessage(), e);
+        }
+    }
+
     public List<String> carregarHistoricoDeMensagens() {
         var mensagens = new ArrayList<String>();
 
         if (this.threadId != null) {
             mensagens.addAll(
-                    service.listMessages(this.threadId)
+                    service
+                            .listMessages(this.threadId)
                             .getData()
                             .stream()
                             .sorted(Comparator.comparingInt(Message::getCreatedAt))
                             .map(m -> m.getContent().get(0).getText().getValue())
-                            .collect(Collectors.toList())
+                            .toList()
             );
         }
+
         return mensagens;
     }
 
     public void apagarThread() {
-        if (threadId != null) {
-            service.deleteThread(threadId);
-            threadId = null;
+        if (this.threadId != null) {
+            service.deleteThread(this.threadId);
+            this.threadId = null;
         }
     }
 }
