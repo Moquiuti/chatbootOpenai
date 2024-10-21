@@ -44,4 +44,8 @@ public class ChatBootService {
     public List<String> carregarHistorico() {
         return client.carregarHistoricoDeMensagens();
     }
+
+    public void limparHistorico() {
+        client.apagarThread();
+    }
 }

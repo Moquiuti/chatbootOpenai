@@ -30,7 +30,7 @@ public class OpenAIClient {
     /**
      * Construtor que inicializa o cliente OpenAI com as chaves de API e assistente.
      *
-     * @param apiKey Chave da API do OpenAI.
+     * @param apiKey      Chave da API do OpenAI.
      * @param assistantId ID do assistente do OpenAI.
      */
     public OpenAIClient(@Value("${app.openai.api.key}") String apiKey,
@@ -114,5 +114,12 @@ public class OpenAIClient {
             );
         }
         return mensagens;
+    }
+
+    public void apagarThread() {
+        if (threadId != null) {
+            service.deleteThread(threadId);
+            threadId = null;
+        }
     }
 }
